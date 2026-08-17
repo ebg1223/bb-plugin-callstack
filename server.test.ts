@@ -214,6 +214,58 @@ test("publish → list → cli round trip", async () => {
   expect(JSON.stringify(paired)).not.toContain("no adjacent concurrent sibling");
 });
 
+test("reality lints: fn existence, stale lines, status, near-miss names", async () => {
+  const { bb, harness } = createFakePluginHost({ pluginId: "callstack" });
+  await plugin(bb);
+  harness.sdk.stub("threads.get", async () =>
+    makeThreadResponse({ id: "th_2", environmentId: "env_1" }),
+  );
+  harness.sdk.stub("environments.get", async () => ({
+    id: "env_1",
+    hostId: "host_1",
+    path: "/ws",
+  }));
+  harness.sdk.stub("files.read", async () => ({
+    content: "function alpha() { return 1; }\n",
+    contentEncoding: "utf8",
+    sha256: "abc",
+  }));
+
+  const result = await harness.behavior.callAgentTool(
+    "callstack_publish",
+    {
+      name: "flow one",
+      status: "current",
+      frames: [
+        { fn: "beta", loc: "src/a.ts:99", change: "added" },
+        { fn: "alpha", loc: "src/a.ts:1" },
+      ],
+    },
+    { threadId: "th_2" },
+  );
+  const text = JSON.stringify(result);
+  expect(text).toContain("fn not found in its loc file");
+  expect(text).toContain("beta");
+  expect(text).toContain("past the end of the file");
+  expect(text).toContain('status \\"current\\" but change markers');
+  expect(text).toContain("Thread state: 1 active flow(s)");
+
+  // proposed with no markers warns; near-miss fn names across flows warn.
+  const second = await harness.behavior.callAgentTool(
+    "callstack_publish",
+    {
+      name: "flow two",
+      status: "proposed",
+      frames: [{ fn: "Alpha", loc: "src/a.ts:1" }],
+    },
+    { threadId: "th_2" },
+  );
+  const secondText = JSON.stringify(second);
+  expect(secondText).toContain('status \\"proposed\\" but no frame');
+  expect(secondText).toContain("nearly match");
+  expect(secondText).toContain("Thread state: 2 active flow(s)");
+});
+
 test("auto-archive lifecycle", async () => {
   const { bb, harness } = createFakePluginHost({ pluginId: "callstack" });
   await plugin(bb);

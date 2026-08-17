@@ -92,10 +92,13 @@ picture — use them deliberately:
   per-frame `change` markers = the delta. Never mix: a "current" flow with
   change markers is a contradiction.
 - **Take publish warnings seriously.** The publish result lints the flow
-  against the workspace: unreadable `loc` paths (wrong or non-relative paths)
-  and defined-but-unreferenced types come back as warnings. Fix and republish
-  immediately — a wrong `loc` silently disables drift tracking and code
-  preview for that frame.
+  against the workspace: unreadable `loc` paths, `fn` names missing from
+  their `loc` file, line numbers past end of file, status/change-marker
+  contradictions, near-duplicate `fn` spellings across flows (broken ⇄), lone
+  `concurrent` frames (probable mis-nesting), and unreferenced types. Fix and
+  republish immediately — each warning marks a place where the picture
+  disagrees with reality. The result also reports the thread's active flow
+  count and which flows have drift needing reconciliation.
 
 ## Granularity
 

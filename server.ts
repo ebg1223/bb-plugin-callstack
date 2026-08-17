@@ -11,11 +11,15 @@
 import { defineRpcContract, type BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import {
+  collectChanges,
   collectFilePaths,
+  collectFns,
   flowSchema,
   locFilePath,
   locLine,
   storedFlowSchema,
+  type Flow,
+  type Frame,
   type StoredFlow,
 } from "./flow-schema";
 
@@ -124,15 +128,21 @@ export default async function plugin(bb: BbPluginApi) {
     };
   }
 
-  /** Content hash per relative path; null marks a file we could not read. */
-  async function hashFiles(
+  const decodeContent = (file: { content: string; contentEncoding: string }) =>
+    file.contentEncoding === "base64"
+      ? Buffer.from(file.content, "base64").toString("utf8")
+      : file.content;
+
+  /** Workspace file contents + hashes; null value = unreadable file, null
+      result = no workspace. */
+  async function readFiles(
     threadId: string,
     paths: string[],
-  ): Promise<Record<string, string | null> | null> {
+  ): Promise<Record<string, { sha256: string; content: string } | null> | null> {
     if (paths.length === 0) return {};
     const workspace = await workspaceFor(threadId);
     if (!workspace) return null;
-    const hashes: Record<string, string | null> = {};
+    const files: Record<string, { sha256: string; content: string } | null> = {};
     for (const path of paths) {
       try {
         const file = await bb.sdk.files.read({
@@ -140,12 +150,24 @@ export default async function plugin(bb: BbPluginApi) {
           path: `${workspace.root}/${path}`,
           rootPath: workspace.root,
         });
-        hashes[path] = file.sha256;
+        files[path] = { sha256: file.sha256, content: decodeContent(file) };
       } catch {
-        hashes[path] = null;
+        files[path] = null;
       }
     }
-    return hashes;
+    return files;
+  }
+
+  /** Content hash per relative path; null marks a file we could not read. */
+  async function hashFiles(
+    threadId: string,
+    paths: string[],
+  ): Promise<Record<string, string | null> | null> {
+    const files = await readFiles(threadId, paths);
+    if (!files) return null;
+    return Object.fromEntries(
+      Object.entries(files).map(([path, file]) => [path, file?.sha256 ?? null]),
+    );
   }
 
   /** Re-hash a flow's files and store which paths changed since publish. */
@@ -239,11 +261,7 @@ export default async function plugin(bb: BbPluginApi) {
           path: `${workspace.root}/${path}`,
           rootPath: workspace.root,
         });
-        const content =
-          file.contentEncoding === "base64"
-            ? Buffer.from(file.content, "base64").toString("utf8")
-            : file.content;
-        const allLines = content.split("\n");
+        const allLines = decodeContent(file).split("\n");
         const targetLine = locLine(loc);
         const center = targetLine ?? 1;
         const startLine = Math.max(1, center - SNIPPET_CONTEXT_LINES);
@@ -317,24 +335,104 @@ export default async function plugin(bb: BbPluginApi) {
     async execute(flow, { threadId }) {
       if (!threadId) return "No thread context; flow not stored.";
       const paths = collectFilePaths(flow.frames);
-      const hashes = await hashFiles(threadId, paths).catch(() => null);
+      const files = await readFiles(threadId, paths).catch(() => null);
+      const hashes = files
+        ? Object.fromEntries(
+            Object.entries(files).map(([path, file]) => [
+              path,
+              file?.sha256 ?? null,
+            ]),
+          )
+        : null;
 
       // Lint the flow against reality so the agent can self-correct now
       // rather than the user discovering a wrong picture later.
       const warnings: string[] = [];
-      if (hashes) {
-        const missing = Object.entries(hashes)
-          .filter(([, sha]) => sha === null)
+      if (files) {
+        const missing = Object.entries(files)
+          .filter(([, file]) => file === null)
           .map(([path]) => path);
         if (missing.length > 0)
           warnings.push(
             `loc paths not readable in the workspace (are they workspace-relative and spelled right?): ${missing.join(", ")}`,
+          );
+
+        // fn should exist in its loc file; loc lines should exist at all.
+        const fnMissing: string[] = [];
+        const staleLines: string[] = [];
+        const identifierFn = /^[A-Za-z_$][\w$]*([.#][A-Za-z_$][\w$]*)*$/;
+        const checkFrame = (frame: Frame) => {
+          const path = locFilePath(frame.loc);
+          const file = path ? files[path] : undefined;
+          if (file && frame.loc) {
+            const lineCount = file.content.split("\n").length;
+            const line = locLine(frame.loc);
+            if (line !== null && line > lineCount)
+              staleLines.push(`${frame.loc} (file has ${lineCount} lines)`);
+            if (identifierFn.test(frame.fn)) {
+              const segment = frame.fn.split(/[.#]/).pop()!;
+              if (!file.content.includes(segment))
+                fnMissing.push(`${frame.fn} (${frame.loc})`);
+            }
+          }
+          frame.calls?.forEach(checkFrame);
+        };
+        flow.frames.forEach(checkFrame);
+        if (fnMissing.length > 0)
+          warnings.push(
+            `fn not found in its loc file (renamed, moved, or wrong file?): ${fnMissing.join(", ")}`,
+          );
+        if (staleLines.length > 0)
+          warnings.push(
+            `loc line numbers past the end of the file: ${staleLines.join(", ")}`,
           );
       } else if (paths.length > 0) {
         warnings.push(
           "no workspace resolved for this thread — drift tracking and code preview are disabled for this flow.",
         );
       }
+
+      // current = verified reality; proposed = has a delta. Enforce both.
+      const changes = collectChanges(flow.frames);
+      if (flow.status === "current" && changes.length > 0)
+        warnings.push(
+          `status "current" but change markers present (${changes.join(", ")}) — current means verified reality; use status "proposed" or drop the markers.`,
+        );
+      if (flow.status === "proposed" && changes.length === 0)
+        warnings.push(
+          'status "proposed" but no frame carries a change marker — mark what changes, or publish as "current".',
+        );
+
+      // Convergence (⇄) keys on exact fn strings; near-misses are typos.
+      const normalizeFn = (fn: string) =>
+        fn.toLowerCase().replace(/[^a-z0-9]/g, "");
+      const otherRows = db
+        .prepare(
+          `SELECT name, data FROM flows WHERE thread_id = ? AND archived = 0 AND name != ?`,
+        )
+        .all(threadId, flow.name) as { name: string; data: string }[];
+      const byNormalized = new Map<string, { fn: string; flowName: string }[]>();
+      for (const row of otherRows) {
+        for (const fn of collectFns((JSON.parse(row.data) as Flow).frames)) {
+          const key = normalizeFn(fn);
+          const list = byNormalized.get(key) ?? [];
+          list.push({ fn, flowName: row.name });
+          byNormalized.set(key, list);
+        }
+      }
+      const nearMisses: string[] = [];
+      for (const fn of collectFns(flow.frames)) {
+        for (const other of byNormalized.get(normalizeFn(fn)) ?? []) {
+          if (other.fn !== fn)
+            nearMisses.push(
+              `"${fn}" vs "${other.fn}" in flow "${other.flowName}"`,
+            );
+        }
+      }
+      if (nearMisses.length > 0)
+        warnings.push(
+          `fn names that nearly match another flow's (⇄ convergence requires exact names): ${nearMisses.join("; ")}`,
+        );
       const edgeText: string[] = [];
       const walkEdges = (frames: typeof flow.frames) => {
         for (const frame of frames) {
@@ -387,7 +485,21 @@ export default async function plugin(bb: BbPluginApi) {
         hashes ? JSON.stringify(hashes) : null,
       );
       bb.realtime.publish(channel(threadId), { threadId });
-      const base = `Published flow "${flow.name}". The user can view it in the Call Stacks thread panel.`;
+
+      // Thread state summary keeps the agent aware of the whole panel.
+      const activeRows = db
+        .prepare(
+          `SELECT name, drifted FROM flows WHERE thread_id = ? AND archived = 0`,
+        )
+        .all(threadId) as { name: string; drifted: string | null }[];
+      const driftedFlows = activeRows
+        .filter((row) => row.drifted && JSON.parse(row.drifted).length > 0)
+        .map((row) => `"${row.name}"`);
+      let summary = `Thread state: ${activeRows.length} active flow(s)`;
+      if (driftedFlows.length > 0)
+        summary += `; drift needs reconciling in ${driftedFlows.join(", ")}`;
+
+      const base = `Published flow "${flow.name}". The user can view it in the Call Stacks thread panel.\n${summary}.`;
       return warnings.length > 0
         ? `${base}\nWarnings — fix and republish if these are mistakes:\n${warnings.map((warning) => `- ${warning}`).join("\n")}`
         : base;
