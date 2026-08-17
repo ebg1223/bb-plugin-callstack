@@ -22,6 +22,12 @@ export interface Frame {
   /** Diff status for before/after views; omitted = "same" */
   change?: FrameChange;
   /**
+   * Sibling order is temporal order (depth-first execution). Mark consecutive
+   * siblings concurrent: true when they start together (Promise.all, parallel
+   * jobs) — the panel brackets them and stops implying a sequence.
+   */
+  concurrent?: boolean;
+  /**
    * Logical module/subsystem for swimlane coloring ("orders", "billing").
    * When omitted, the panel derives it from the loc's containing directory.
    */
@@ -58,6 +64,7 @@ export const frameSchema: z.ZodType<Frame> = z.lazy(() =>
     cond: z.string().max(300).optional(),
     loop: z.string().max(300).optional(),
     change: z.enum(["same", "added", "modified", "removed"]).optional(),
+    concurrent: z.boolean().optional(),
     module: z.string().min(1).max(60).optional(),
     note: z.string().max(500).optional(),
     detail: z.string().max(2000).optional(),
@@ -141,6 +148,24 @@ export function collectFns(frames: Frame[]): string[] {
   };
   frames.forEach(walk);
   return [...fns];
+}
+
+export function countDescendants(frame: Frame): number {
+  return (frame.calls ?? []).reduce(
+    (count, kid) => count + 1 + countDescendants(kid),
+    0,
+  );
+}
+
+/** Distinct non-"same" change markers anywhere in these frames' subtrees. */
+export function collectChanges(frames: Frame[]): FrameChange[] {
+  const found = new Set<FrameChange>();
+  const walk = (frame: Frame) => {
+    if (frame.change && frame.change !== "same") found.add(frame.change);
+    frame.calls?.forEach(walk);
+  };
+  frames.forEach(walk);
+  return [...found];
 }
 
 export function collectFilePaths(frames: Frame[]): string[] {

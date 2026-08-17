@@ -58,6 +58,14 @@ const channel = (threadId: string) => `flows:${threadId}`;
 const SNIPPET_CONTEXT_LINES = 8;
 
 export default async function plugin(bb: BbPluginApi) {
+  const settings = bb.settings.define({
+    autoArchiveDays: {
+      type: "select",
+      label: "Auto-archive flows not updated for",
+      options: ["off", "7 days", "14 days", "30 days"],
+      default: "14 days",
+    },
+  });
   const db = bb.storage.database();
   bb.storage.migrate(db, [
     `CREATE TABLE IF NOT EXISTS flows (
@@ -179,6 +187,39 @@ export default async function plugin(bb: BbPluginApi) {
     refreshDrift(thread.id).catch((error) => {
       bb.log.warn(`drift check failed for ${thread.id}: ${error}`);
     });
+  });
+
+  // Flows follow their thread's lifecycle: archive with it, delete with it.
+  bb.events.on("thread.archived", ({ thread }) => {
+    const result = db
+      .prepare(`UPDATE flows SET archived = 1 WHERE thread_id = ? AND archived = 0`)
+      .run(thread.id);
+    if (result.changes > 0)
+      bb.realtime.publish(channel(thread.id), { threadId: thread.id });
+  });
+  bb.events.on("thread.deleted", ({ thread }) => {
+    db.prepare(`DELETE FROM flows WHERE thread_id = ?`).run(thread.id);
+  });
+
+  // Age policy: archive flows nobody has touched in N days (daily sweep).
+  bb.background.schedule("auto-archive", "0 3 * * *", async () => {
+    const { autoArchiveDays } = await settings.get();
+    const days = Number.parseInt(autoArchiveDays, 10);
+    if (!Number.isFinite(days) || days <= 0) return;
+    const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
+    const stale = db
+      .prepare(
+        `SELECT DISTINCT thread_id FROM flows WHERE archived = 0 AND updated_at < ?`,
+      )
+      .all(cutoff) as { thread_id: string }[];
+    const result = db
+      .prepare(`UPDATE flows SET archived = 1 WHERE archived = 0 AND updated_at < ?`)
+      .run(cutoff);
+    if (result.changes > 0) {
+      bb.log.info(`auto-archived ${result.changes} flow(s) older than ${days}d`);
+      for (const row of stale)
+        bb.realtime.publish(channel(row.thread_id), { threadId: row.thread_id });
+    }
   });
 
   bb.rpc.register(rpcContract, {
@@ -310,6 +351,26 @@ export default async function plugin(bb: BbPluginApi) {
       if (unusedTypes.length > 0)
         warnings.push(
           `types defined but never referenced by any frame's in/out: ${unusedTypes.join(", ")}`,
+        );
+      // concurrent marks a group of siblings that start together; a lone
+      // concurrent frame in a sibling list usually means one of the group was
+      // nested under the wrong parent.
+      const loneConcurrent: string[] = [];
+      const walkSiblings = (frames: typeof flow.frames) => {
+        frames.forEach((frame, index) => {
+          if (
+            frame.concurrent &&
+            !frames[index - 1]?.concurrent &&
+            !frames[index + 1]?.concurrent
+          )
+            loneConcurrent.push(frame.fn);
+          if (frame.calls) walkSiblings(frame.calls);
+        });
+      };
+      walkSiblings(flow.frames);
+      if (loneConcurrent.length > 0)
+        warnings.push(
+          `concurrent frames with no adjacent concurrent sibling (check nesting — the rest of the group may be under the wrong parent): ${loneConcurrent.join(", ")}`,
         );
 
       db.prepare(

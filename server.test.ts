@@ -5,13 +5,28 @@ import {
 } from "@get-bb/plugin-sdk/testing";
 import plugin from "./server";
 import {
+  collectChanges,
   collectFilePaths,
   collectFns,
   collectLanes,
+  countDescendants,
   frameLane,
   locFilePath,
   locLine,
 } from "./flow-schema";
+
+test("subtree summaries", () => {
+  const tree = {
+    fn: "root",
+    calls: [
+      { fn: "a", change: "added" as const },
+      { fn: "b", calls: [{ fn: "c", change: "removed" as const }] },
+    ],
+  };
+  expect(countDescendants(tree)).toBe(3);
+  expect(collectChanges(tree.calls)).toEqual(["added", "removed"]);
+  expect(collectChanges([{ fn: "x", change: "same" as const }])).toEqual([]);
+});
 
 test("lanes and fn collection", () => {
   expect(frameLane({ fn: "a", module: "billing", loc: "src/x/y.ts:1" })).toBe(
@@ -156,4 +171,102 @@ test("publish → list → cli round trip", async () => {
   expect(message).toContain("no workspace resolved");
   expect(message).toContain("never referenced");
   expect(message).toContain("Unused");
+
+  // Lone-concurrent lint: mis-nested group members get flagged.
+  const misNested = await harness.behavior.callAgentTool(
+    "callstack_publish",
+    {
+      name: "concurrency lint",
+      frames: [
+        {
+          fn: "handler",
+          calls: [
+            { fn: "months", calls: [{ fn: "derive", concurrent: true }] },
+            { fn: "derive2", concurrent: true },
+          ],
+        },
+      ],
+    },
+    { threadId: "th_1" },
+  );
+  const misNestedText = JSON.stringify(misNested);
+  expect(misNestedText).toContain("no adjacent concurrent sibling");
+  expect(misNestedText).toContain("derive");
+  expect(misNestedText).toContain("derive2");
+
+  // A proper adjacent pair does not warn.
+  const paired = await harness.behavior.callAgentTool(
+    "callstack_publish",
+    {
+      name: "concurrency ok",
+      frames: [
+        {
+          fn: "handler",
+          calls: [
+            { fn: "a", concurrent: true },
+            { fn: "b", concurrent: true },
+          ],
+        },
+      ],
+    },
+    { threadId: "th_1" },
+  );
+  expect(JSON.stringify(paired)).not.toContain("no adjacent concurrent sibling");
+});
+
+test("auto-archive lifecycle", async () => {
+  const { bb, harness } = createFakePluginHost({ pluginId: "callstack" });
+  await plugin(bb);
+
+  await harness.behavior.callAgentTool(
+    "callstack_publish",
+    { name: "old flow", frames: [{ fn: "a" }] },
+    { threadId: "th_9" },
+  );
+
+  // thread.archived archives its flows.
+  await harness.behavior.emitThreadEvent("thread.archived", {
+    thread: makeThreadResponse({ id: "th_9" }),
+  });
+  let flows = (await harness.behavior.callRpc("listFlows", { threadId: "th_9" }))
+    .flows;
+  expect(flows[0].archived).toBe(true);
+
+  // Republish reactivates; the daily sweep archives once past the cutoff.
+  await harness.behavior.callAgentTool(
+    "callstack_publish",
+    { name: "old flow", frames: [{ fn: "a" }] },
+    { threadId: "th_9" },
+  );
+  const db = bb.storage.database();
+  db.prepare(`UPDATE flows SET updated_at = ? WHERE thread_id = 'th_9'`).run(
+    Date.now() - 15 * 24 * 60 * 60 * 1000,
+  );
+  await harness.behavior.runSchedule("auto-archive");
+  flows = (await harness.behavior.callRpc("listFlows", { threadId: "th_9" }))
+    .flows;
+  expect(flows[0].archived).toBe(true);
+
+  // thread.deleted removes the rows entirely.
+  await harness.behavior.emitThreadEvent("thread.deleted", {
+    thread: makeThreadResponse({ id: "th_9" }),
+  });
+  flows = (await harness.behavior.callRpc("listFlows", { threadId: "th_9" }))
+    .flows;
+  expect(flows).toHaveLength(0);
+
+  // "off" disables the sweep.
+  await harness.behavior.setSettings({ autoArchiveDays: "off" });
+  await harness.behavior.callAgentTool(
+    "callstack_publish",
+    { name: "kept", frames: [{ fn: "b" }] },
+    { threadId: "th_9" },
+  );
+  db.prepare(`UPDATE flows SET updated_at = ? WHERE thread_id = 'th_9'`).run(
+    Date.now() - 99 * 24 * 60 * 60 * 1000,
+  );
+  await harness.behavior.runSchedule("auto-archive");
+  flows = (await harness.behavior.callRpc("listFlows", { threadId: "th_9" }))
+    .flows;
+  expect(flows[0].archived).toBe(false);
 });

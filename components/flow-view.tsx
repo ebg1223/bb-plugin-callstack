@@ -93,8 +93,16 @@ function FrameNode({
           traced && "ring-1 ring-violet-500/60",
         )}
       >
-        {(frame.cond || frame.loop) && (
+        {(frame.cond || frame.loop || frame.concurrent) && (
           <div className="flex flex-wrap gap-1.5 border-b border-border/60 px-2.5 py-1">
+            {frame.concurrent && (
+              <span
+                title="Starts together with adjacent concurrent siblings — no sequence implied"
+                className="rounded bg-muted px-1.5 py-px font-mono text-[11px] text-muted-foreground"
+              >
+                ∥ concurrent
+              </span>
+            )}
             {frame.cond && (
               <span className="rounded bg-amber-500/10 px-1.5 py-px font-mono text-[11px] text-amber-700 dark:text-amber-400">
                 if {frame.cond}
@@ -494,6 +502,7 @@ export function FlowView({
       </header>
       {view === "diagram" ? (
         <DiagramView
+          key={flow.updatedAt}
           flow={flow}
           lanes={lanes}
           sharedFns={sharedFns}

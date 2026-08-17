@@ -80,6 +80,13 @@ picture — use them deliberately:
   "billing") when the directory name would mislead; otherwise omit it and the
   panel derives the lane from the loc's containing directory. Use the same
   module string across flows for the same subsystem.
+- **Sibling order is temporal order.** The reader interprets the `calls`
+  array depth-first: a frame's first child and its entire subtree run before
+  the second child. Order siblings by when they actually execute. When
+  siblings genuinely start together (Promise.all, parallel workers, fired
+  events), mark each with `concurrent: true` — consecutive concurrent
+  siblings are bracketed ∥ in the panel and no sequence is implied. Never use
+  `concurrent` for "order unknown"; go read the code instead.
 - **Reality vs proposal.** `status: "current"` + no change markers = the code
   as it is (verify by reading it, not from memory). `status: "proposed"` +
   per-frame `change` markers = the delta. Never mix: a "current" flow with
