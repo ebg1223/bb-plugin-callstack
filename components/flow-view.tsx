@@ -11,6 +11,7 @@ import {
 import { cn } from "@/lib/utils";
 import { isStale, timeAgo } from "../lib/staleness";
 import { DiagramView } from "./diagram-view";
+import { LanesView } from "./lanes-view";
 import {
   DefinitionsBlock,
   DiffBlock,
@@ -407,7 +408,7 @@ export function FlowView({
   callbacks?: FlowCallbacks;
 }) {
   const [trace, setTrace] = useState<string | null>(null);
-  const [view, setView] = useState<"tree" | "diagram">("tree");
+  const [view, setView] = useState<"tree" | "diagram" | "lanes">("tree");
   const stale = isStale(flow, now);
   const focusChanges = flowHasChanges(flow);
   const lanes = collectLanes(flow.frames);
@@ -464,7 +465,7 @@ export function FlowView({
               {timeAgo(flow.updatedAt, now)}
             </span>
             <span className="flex overflow-hidden rounded border border-border text-[10px]">
-              {(["tree", "diagram"] as const).map((mode) => (
+              {(["tree", "diagram", "lanes"] as const).map((mode) => (
                 <button
                   key={mode}
                   type="button"
@@ -506,6 +507,15 @@ export function FlowView({
           flow={flow}
           lanes={lanes}
           sharedFns={sharedFns}
+          trace={trace}
+          onTrace={setTrace}
+          callbacks={callbacks}
+        />
+      ) : view === "lanes" ? (
+        <LanesView
+          key={flow.updatedAt}
+          flow={flow}
+          lanes={lanes}
           trace={trace}
           onTrace={setTrace}
           callbacks={callbacks}

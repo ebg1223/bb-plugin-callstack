@@ -156,14 +156,14 @@ const changeDotColor: Record<string, string> = {
   modified: "bg-amber-500",
 };
 
-function DetailPane({
-  node,
+export function DetailPane({
+  frame,
   flow,
   trace,
   onTrace,
   callbacks,
 }: {
-  node: Positioned;
+  frame: Frame;
   flow: StoredFlow;
   trace: string | null;
   onTrace: (trace: string | null) => void;
@@ -172,7 +172,6 @@ function DetailPane({
   const [expandedChip, setExpandedChip] = useState<"in" | "out" | null>(null);
   const [showSnippet, setShowSnippet] = useState(false);
   const [showDiff, setShowDiff] = useState(false);
-  const frame = node.frame;
   const types = flow.types ?? {};
   const inDefs = definitionsFor(frame.in, types);
   const outDefs = definitionsFor(frame.out, types);
@@ -632,7 +631,7 @@ export function DiagramView({
       {selected ? (
         <DetailPane
           key={selected.id}
-          node={selected}
+          frame={selected.frame}
           flow={flow}
           trace={trace}
           onTrace={onTrace}

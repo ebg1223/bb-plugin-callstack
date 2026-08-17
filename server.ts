@@ -17,6 +17,7 @@ import {
   flowSchema,
   locFilePath,
   locLine,
+  reanchorLocs,
   storedFlowSchema,
   type Flow,
   type Frame,
@@ -170,15 +171,20 @@ export default async function plugin(bb: BbPluginApi) {
     );
   }
 
-  /** Re-hash a flow's files and store which paths changed since publish. */
+  /**
+   * Re-hash a flow's files, store which paths changed since publish, and
+   * re-anchor loc line numbers in drifted files so snippet clicks stay
+   * accurate. The drift flag stays set until the agent reconciles.
+   */
   async function refreshDrift(threadId: string): Promise<void> {
     const rows = db
       .prepare(
-        `SELECT name, file_hashes, drifted FROM flows
+        `SELECT name, data, file_hashes, drifted FROM flows
          WHERE thread_id = ? AND archived = 0 AND file_hashes IS NOT NULL`,
       )
       .all(threadId) as {
       name: string;
+      data: string;
       file_hashes: string;
       drifted: string | null;
     }[];
@@ -188,28 +194,34 @@ export default async function plugin(bb: BbPluginApi) {
         string,
         string | null
       >;
-      const current = await hashFiles(threadId, Object.keys(baseline));
-      if (!current) continue;
+      const files = await readFiles(threadId, Object.keys(baseline));
+      if (!files) continue;
       const drifted = Object.keys(baseline)
-        .filter((path) => baseline[path] !== current[path])
+        .filter((path) => baseline[path] !== (files[path]?.sha256 ?? null))
         .sort();
-      const stored = row.drifted ?? "[]";
+      const flowData = JSON.parse(row.data) as Flow;
+      let reanchored = false;
+      for (const path of drifted) {
+        const content = files[path]?.content;
+        if (content)
+          reanchored = reanchorLocs(flowData.frames, path, content) || reanchored;
+      }
       const next = JSON.stringify(drifted);
-      if (next !== stored) {
+      if (reanchored || next !== (row.drifted ?? "[]")) {
         db.prepare(
-          `UPDATE flows SET drifted = ? WHERE thread_id = ? AND name = ?`,
-        ).run(next, threadId, row.name);
+          `UPDATE flows SET drifted = ?, data = ? WHERE thread_id = ? AND name = ?`,
+        ).run(next, JSON.stringify(flowData), threadId, row.name);
         changed = true;
       }
     }
     if (changed) bb.realtime.publish(channel(threadId), { threadId });
   }
 
-  bb.events.on("thread.idle", ({ thread }) => {
+  bb.events.on("thread.idle", ({ thread }) =>
     refreshDrift(thread.id).catch((error) => {
       bb.log.warn(`drift check failed for ${thread.id}: ${error}`);
-    });
-  });
+    }),
+  );
 
   // Flows follow their thread's lifecycle: archive with it, delete with it.
   bb.events.on("thread.archived", ({ thread }) => {

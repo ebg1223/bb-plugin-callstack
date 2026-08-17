@@ -6,6 +6,7 @@ import {
 import plugin from "./server";
 import {
   collectChanges,
+  reanchorLocs,
   collectFilePaths,
   collectFns,
   collectLanes,
@@ -14,6 +15,19 @@ import {
   locFilePath,
   locLine,
 } from "./flow-schema";
+
+test("reanchorLocs prefers definition lines and skips prose fns", () => {
+  const frames = [
+    { fn: "alpha", loc: "src/a.ts:1" },
+    { fn: "POST /api/x", loc: "src/a.ts:9" },
+    { fn: "beta", loc: "src/b.ts:1" },
+  ];
+  const content = "import { alpha } from './x';\n\nconst alpha = () => 1;\n";
+  expect(reanchorLocs(frames, "src/a.ts", content)).toBe(true);
+  expect(frames[0].loc).toBe("src/a.ts:3"); // definition line, not the import
+  expect(frames[1].loc).toBe("src/a.ts:9"); // prose fn untouched
+  expect(frames[2].loc).toBe("src/b.ts:1"); // other file untouched
+});
 
 test("subtree summaries", () => {
   const tree = {
@@ -264,6 +278,46 @@ test("reality lints: fn existence, stale lines, status, near-miss names", async 
   expect(secondText).toContain('status \\"proposed\\" but no frame');
   expect(secondText).toContain("nearly match");
   expect(secondText).toContain("Thread state: 2 active flow(s)");
+});
+
+test("drift re-anchors loc lines but keeps the drift flag", async () => {
+  const { bb, harness } = createFakePluginHost({ pluginId: "callstack" });
+  await plugin(bb);
+  harness.sdk.stub("threads.get", async () =>
+    makeThreadResponse({ id: "th_3", environmentId: "env_1" }),
+  );
+  harness.sdk.stub("environments.get", async () => ({
+    id: "env_1",
+    hostId: "host_1",
+    path: "/ws",
+  }));
+  let content = "function alpha() { return 1; }\n";
+  let sha = "v1";
+  harness.sdk.stub("files.read", async () => ({
+    content,
+    contentEncoding: "utf8",
+    sha256: sha,
+  }));
+
+  await harness.behavior.callAgentTool(
+    "callstack_publish",
+    { name: "anchored", frames: [{ fn: "alpha", loc: "src/a.ts:1" }] },
+    { threadId: "th_3" },
+  );
+
+  // File changes: alpha moves to line 3.
+  content = "// header\n// more\nfunction alpha() { return 2; }\n";
+  sha = "v2";
+  await harness.behavior.emitThreadEvent("thread.idle", {
+    thread: makeThreadResponse({ id: "th_3" }),
+    lastAssistantText: null,
+  });
+
+  const flows = (
+    await harness.behavior.callRpc("listFlows", { threadId: "th_3" })
+  ).flows;
+  expect(flows[0].driftedPaths).toEqual(["src/a.ts"]);
+  expect(flows[0].frames[0].loc).toBe("src/a.ts:3");
 });
 
 test("auto-archive lifecycle", async () => {

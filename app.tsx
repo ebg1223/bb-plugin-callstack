@@ -8,12 +8,13 @@ import {
   useRpc,
 } from "@get-bb/plugin-sdk/app";
 import type { rpcContract } from "./server";
-import { collectFns, type StoredFlow } from "./flow-schema";
+import { collectFns, collectLanes, type StoredFlow } from "./flow-schema";
 import {
   FlowLegend,
   FlowView,
   type FlowCallbacks,
 } from "./components/flow-view";
+import { MergedView } from "./components/merged-view";
 
 function useMinuteClock(): number {
   const [now, setNow] = useState(() => Date.now());
@@ -27,6 +28,7 @@ function useMinuteClock(): number {
 function CallStacksPanel({ threadId }: { threadId: string }) {
   const rpc = useRpc<typeof rpcContract>();
   const [flows, setFlows] = useState<StoredFlow[] | null>(null);
+  const [mode, setMode] = useState<"flows" | "combined">("flows");
   const now = useMinuteClock();
 
   const refresh = useCallback(() => {
@@ -80,17 +82,43 @@ function CallStacksPanel({ threadId }: { threadId: string }) {
 
   const active = flows.filter((flow) => !flow.archived);
   const archived = flows.filter((flow) => flow.archived);
+  const combinedLanes = collectLanes(active.flatMap((flow) => flow.frames));
   return (
     <div className="space-y-3">
-      {active.map((flow) => (
-        <FlowView
-          key={flow.name}
-          flow={flow}
-          now={now}
-          sharedFns={sharedFns}
-          callbacks={callbacks}
-        />
-      ))}
+      {active.length > 1 && (
+        <div className="flex justify-end">
+          <span className="flex overflow-hidden rounded border border-border text-[10px]">
+            {(["flows", "combined"] as const).map((option) => (
+              <button
+                key={option}
+                type="button"
+                onClick={() => setMode(option)}
+                aria-pressed={mode === option}
+                className={
+                  mode === option
+                    ? "bg-muted px-2 py-0.5 text-foreground"
+                    : "px-2 py-0.5 text-muted-foreground hover:text-foreground"
+                }
+              >
+                {option}
+              </button>
+            ))}
+          </span>
+        </div>
+      )}
+      {mode === "combined" && active.length > 1 ? (
+        <MergedView flows={active} lanes={combinedLanes} />
+      ) : (
+        active.map((flow) => (
+          <FlowView
+            key={flow.name}
+            flow={flow}
+            now={now}
+            sharedFns={sharedFns}
+            callbacks={callbacks}
+          />
+        ))
+      )}
       {archived.length > 0 && (
         <details>
           <summary className="cursor-pointer text-xs text-muted-foreground">

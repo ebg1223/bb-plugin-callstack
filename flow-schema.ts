@@ -168,6 +168,53 @@ export function collectChanges(frames: Frame[]): FrameChange[] {
   return [...found];
 }
 
+const identifierFn = /^[A-Za-z_$][\w$]*([.#][A-Za-z_$][\w$]*)*$/;
+
+/**
+ * Re-point loc line numbers at the current content of a drifted file so
+ * snippet clicks stay accurate. Prefers definition-shaped lines over first
+ * mention. Mutates frames; returns whether any loc changed. Deliberately does
+ * NOT clear drift — content changed, the agent still needs to reconcile.
+ */
+export function reanchorLocs(
+  frames: Frame[],
+  path: string,
+  content: string,
+): boolean {
+  const lines = content.split("\n");
+  let changed = false;
+  const findLine = (segment: string): number | null => {
+    const escaped = segment.replace(/\$/g, "\\$");
+    const word = new RegExp(`\\b${escaped}\\b`);
+    const definition = new RegExp(
+      `(function|const|let|var|def|fn|async|public|private|static)\\s+${escaped}\\b|\\b${escaped}\\s*[:=(]`,
+    );
+    let firstMention: number | null = null;
+    for (let index = 0; index < lines.length; index++) {
+      if (!word.test(lines[index])) continue;
+      if (definition.test(lines[index])) return index + 1;
+      if (firstMention === null) firstMention = index + 1;
+    }
+    return firstMention;
+  };
+  const walk = (frame: Frame) => {
+    if (locFilePath(frame.loc) === path && identifierFn.test(frame.fn)) {
+      const segment = frame.fn.split(/[.#]/).pop()!;
+      const line = findLine(segment);
+      if (line !== null) {
+        const next = `${path}:${line}`;
+        if (frame.loc !== next) {
+          frame.loc = next;
+          changed = true;
+        }
+      }
+    }
+    frame.calls?.forEach(walk);
+  };
+  frames.forEach(walk);
+  return changed;
+}
+
 export function collectFilePaths(frames: Frame[]): string[] {
   const paths = new Set<string>();
   const walk = (frame: Frame) => {
