@@ -14,7 +14,7 @@ import {
   collectChanges,
   collectFilePaths,
   collectFns,
-  flowSchema,
+  flowToolSchema,
   locFilePath,
   locLine,
   reanchorLocs,
@@ -343,7 +343,7 @@ export default async function plugin(bb: BbPluginApi) {
       pending: "Publishing call stack",
       completed: "Published call stack",
     },
-    parameters: flowSchema,
+    parameters: flowToolSchema,
     async execute(flow, { threadId }) {
       if (!threadId) return "No thread context; flow not stored.";
       const paths = collectFilePaths(flow.frames);

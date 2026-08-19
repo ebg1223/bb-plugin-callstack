@@ -55,31 +55,62 @@ export interface Flow {
   types?: Record<string, string>;
 }
 
+const frameFields = {
+  fn: z.string().min(1).max(200),
+  loc: z.string().max(300).optional(),
+  in: z.string().max(300).optional(),
+  out: z.string().max(300).optional(),
+  cond: z.string().max(300).optional(),
+  loop: z.string().max(300).optional(),
+  change: z.enum(["same", "added", "modified", "removed"]).optional(),
+  concurrent: z.boolean().optional(),
+  module: z.string().min(1).max(60).optional(),
+  note: z.string().max(500).optional(),
+  detail: z.string().max(2000).optional(),
+};
+
 export const frameSchema: z.ZodType<Frame> = z.lazy(() =>
   z.object({
-    fn: z.string().min(1).max(200),
-    loc: z.string().max(300).optional(),
-    in: z.string().max(300).optional(),
-    out: z.string().max(300).optional(),
-    cond: z.string().max(300).optional(),
-    loop: z.string().max(300).optional(),
-    change: z.enum(["same", "added", "modified", "removed"]).optional(),
-    concurrent: z.boolean().optional(),
-    module: z.string().min(1).max(60).optional(),
-    note: z.string().max(500).optional(),
-    detail: z.string().max(2000).optional(),
+    ...frameFields,
     calls: z.array(frameSchema).max(50).optional(),
   }),
 );
 
-export const flowSchema = z.object({
+/**
+ * Depth-bounded frame schema for the agent tool: providers reject recursive
+ * JSON-schema $refs, so the tool advertises explicit nesting instead. The
+ * skill recommends 3–5 levels; 8 is headroom, not a target.
+ */
+function boundedFrameSchema(depth: number): z.ZodType<Frame> {
+  const shape =
+    depth <= 0
+      ? frameFields
+      : {
+          ...frameFields,
+          calls: z.array(boundedFrameSchema(depth - 1)).max(50).optional(),
+        };
+  return z.object(shape) as z.ZodType<Frame>;
+}
+
+const flowFields = {
   name: z.string().min(1).max(120),
   description: z.string().max(1000).optional(),
   status: z.enum(["current", "proposed"]).optional(),
-  frames: z.array(frameSchema).min(1).max(50),
   types: z
     .record(z.string().min(1).max(200), z.string().min(1).max(2000))
     .optional(),
+};
+
+/** Recursive form — for rpc validation and internal use. */
+export const flowSchema = z.object({
+  ...flowFields,
+  frames: z.array(frameSchema).min(1).max(50),
+});
+
+/** Bounded form — for the callstack_publish tool's advertised parameters. */
+export const flowToolSchema = z.object({
+  ...flowFields,
+  frames: z.array(boundedFrameSchema(7)).min(1).max(50),
 });
 
 export interface StoredFlow extends Flow {
